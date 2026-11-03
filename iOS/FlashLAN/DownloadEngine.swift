@@ -765,7 +765,9 @@ enum SerialDownloadQueue {
     static func origin(_ raw: String) -> String? {
         guard let url = URL(string: raw), let scheme = url.scheme?.lowercased(),
               ["http", "https"].contains(scheme), let host = url.host?.lowercased() else { return nil }
-        return "\(scheme)://\(host):\(url.port ?? (scheme == "https" ? 443 : 80))"
+        let defaultPort = scheme == "https" ? 443 : 80
+        let portNumber = url.port ?? defaultPort
+        return "\(scheme)://\(host):\(portNumber)"
     }
     static func batchIDs(records: [DownloadRecord], restoring: Bool, outstanding: Bool) -> [String] {
         guard !restoring, !outstanding,

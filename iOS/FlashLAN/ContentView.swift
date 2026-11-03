@@ -184,6 +184,13 @@ struct DownloadsView: View {
         engine.records.first { ["downloading", "scheduled"].contains($0.status) }
     }
     
+    private var downloadingCount: Int {
+        engine.records.filter { $0.status != "completed" }.count
+    }
+    private var completedRecordsCount: Int {
+        engine.records.filter { $0.status == "completed" }.count
+    }
+    
     private var shown: [DownloadRecord] {
         if completed { return Array(engine.records.filter { $0.status == "completed" }.reversed()) }
         let active = engine.records.filter { ["downloading", "pausing", "cancelling"].contains($0.status) }
@@ -203,8 +210,8 @@ struct DownloadsView: View {
                 }
                 
                 Picker("状态", selection: $completed) {
-                    Text("下载队列 (\(engine.records.filter { $0.status != \"completed\" }.count))").tag(false)
-                    Text("已完成 (\(engine.records.filter { $0.status == \"completed\" }.count))").tag(true)
+                    Text("下载队列 (\(downloadingCount))").tag(false)
+                    Text("已完成 (\(completedRecordsCount))").tag(true)
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal)
