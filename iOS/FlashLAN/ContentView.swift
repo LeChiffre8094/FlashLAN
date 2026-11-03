@@ -323,6 +323,8 @@ struct DownloadsView: View {
                     .presentationDragIndicator(.visible)
                 case .preview:
                     if let access = item.access { FilePreviewSheet(url: access.url) { panel = nil } }
+                case .openIn:
+                    if let access = item.access { FileOpenInView(access: access) }
                 case .share:
                     if let access = item.access { FileShareView(access: access) }
                 case .move, .copy:
@@ -476,6 +478,7 @@ struct DownloadsView: View {
         guard let request = pendingAction else { return }
         pendingAction = nil
         switch request.action {
+        case .openIn: open(request.record, kind: .openIn)
         case .share: open(request.record, kind: .share)
         case .move: open(request.record, kind: .move)
         case .copy: open(request.record, kind: .copy)
@@ -827,7 +830,7 @@ struct FileBadge: View {
 }
 
 struct FilePanel: Identifiable {
-    enum Kind { case menu, preview, share, move, copy }
+    enum Kind { case menu, preview, share, openIn, move, copy }
     let id = UUID()
     let kind: Kind
     let record: DownloadRecord
@@ -835,7 +838,7 @@ struct FilePanel: Identifiable {
 }
 
 struct PendingFileAction {
-    enum Action { case share, move, copy, rename, deleteFile, deleteRecord }
+    enum Action { case share, openIn, move, copy, rename, deleteFile, deleteRecord }
     let record: DownloadRecord
     let action: Action
 }
@@ -849,6 +852,7 @@ struct CompletedFileMenu: View {
         NavigationStack {
             List {
                 Section(name) {
+                    Button { onSelect(.openIn) } label: { Label("在其他应用中打开 (APlayer / Infuse…)", systemImage: "arrow.up.forward.app") }
                     Button { onSelect(.share) } label: { Label("分享到其他应用", systemImage: "square.and.arrow.up") }
                     Button { onSelect(.copy) } label: { Label("复制到文件夹…", systemImage: "doc.on.doc") }
                     Button { onSelect(.move) } label: { Label("移动到文件夹…", systemImage: "folder") }
@@ -919,4 +923,25 @@ struct DestinationFolderPicker: UIViewControllerRepresentable {
             onPick(nil)
         }
     }
+}
+
+struct FileOpenInView: UIViewControllerRepresentable {
+    let access: LocalFileAccess
+    
+    func makeUIViewController(context: Context) -> UIViewController {
+        let vc = UIViewController()
+        DispatchQueue.main.async {
+            let docController = UIDocumentInteractionController(url: access.url)
+            docController.delegate = context.coordinator
+            if !docController.presentOpenInMenu(from: vc.view.bounds, in: vc.view, animated: true) {
+                let activity = UIActivityViewController(activityItems: [access.url], applicationActivities: nil)
+                vc.present(activity, animated: true)
+            }
+        }
+        return vc
+    }
+    
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    final class Coordinator: NSObject, UIDocumentInteractionControllerDelegate {}
 }

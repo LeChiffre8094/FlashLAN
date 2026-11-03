@@ -4,14 +4,19 @@ import KSPlayer
 
 // Two playback engines; the FFmpeg engine also exposes a software decoding mode.
 enum PlaybackEngine: String, CaseIterable, Identifiable {
-    case native = "系统引擎", ffmpeg = "FFmpeg · 硬解优先", software = "FFmpeg · 软件解码"
+    case ffmpeg = "FFmpeg · 硬解优先", software = "FFmpeg · 软件解码", native = "系统原生引擎"
     var id: String { rawValue }
     static func initial(for name: String) -> PlaybackEngine {
-        let ext = (name as NSString).pathExtension.lowercased()
-        return ["mp4", "mov", "m4v", "3gp"].contains(ext) ? .native : .ffmpeg
+        // Universal adaptive playback: Default to FFmpeg (hardware accelerated via VideoToolbox, auto-fallback to Software)
+        // Solves issues with Hi10P, AC3, DTS, AV1, and non-standard MP4s like APlayer does.
+        return .ffmpeg
     }
     var fallback: PlaybackEngine? {
-        switch self { case .native: return .ffmpeg; case .ffmpeg: return .software; case .software: return nil }
+        switch self {
+        case .ffmpeg: return .software
+        case .software: return .native
+        case .native: return nil
+        }
     }
 }
 

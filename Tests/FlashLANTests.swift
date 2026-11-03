@@ -263,17 +263,16 @@ final class FlashLANTests: XCTestCase {
         } catch { XCTAssertTrue(error.localizedDescription.contains("层级")) }
     }
     
-    func testMKVAndNonNativeContainersChooseFFmpeg() {
-        for name in ["movie.MKV", "movie.avi", "movie.ts", "movie.webm", "movie.wmv", "movie.flv"] {
+    func testUniversalAdaptiveEngineDefaultsToFFmpeg() {
+        for name in ["movie.MKV", "movie.avi", "movie.ts", "movie.webm", "movie.wmv", "movie.flv", "movie.MP4", "movie.m4v"] {
             XCTAssertEqual(PlaybackEngine.initial(for: name), .ffmpeg)
         }
-        XCTAssertEqual(PlaybackEngine.initial(for: "movie.MP4"), .native)
     }
     
-    func testPlaybackFallbackTerminatesAfterSoftwareAttempt() {
-        XCTAssertEqual(PlaybackEngine.native.fallback, .ffmpeg)
+    func testPlaybackFallbackOrder() {
         XCTAssertEqual(PlaybackEngine.ffmpeg.fallback, .software)
-        XCTAssertNil(PlaybackEngine.software.fallback)
+        XCTAssertEqual(PlaybackEngine.software.fallback, .native)
+        XCTAssertNil(PlaybackEngine.native.fallback)
     }
 
     func testNumberedDownloadSkipsExistingNamesAndPreservesExtension() throws {
