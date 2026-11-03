@@ -180,17 +180,21 @@ final class DownloadEngine: NSObject, ObservableObject, URLSessionDownloadDelega
     
     private func startNextIfPossible() {
         guard !restoring else { return }
-        // Strict single-task relay: exactly 1 file actively downloading at any time
-        if records.contains(where: { ["downloading", "scheduled"].contains($0.status) }) {
-            updateIdleTimer()
-            return
+        // Submit the whole server batch while awake.
+        // Background session handles lock-screen sequential progression via the PC Assistant's single-file gate.
+        let ids = SerialDownloadQueue.batchIDs(records: records, restoring: restoring, outstanding: !retiringTasks.isEmpty)
+        for id in ids {
+            guard let i = records.firstIndex(where: { $0.id == id }) else { continue }
+            if let task = tasks[id] {
+                records[i].status = "scheduled"
+                records[i].error = nil
+                persist()
+                task.resume()
+            } else {
+                startTask(records[i], resume: true)
+            }
         }
-        guard let next = records.first(where: { $0.status == "queued" }) else {
-            updateSpeed(bytes: 0, forceReset: true)
-            updateIdleTimer()
-            return
-        }
-        startTask(next, resume: true)
+        updateIdleTimer()
     }
     
     private func availableBytes() -> Int64? {
