@@ -105,9 +105,11 @@ final class DownloadEngine: NSObject, ObservableObject, URLSessionDownloadDelega
         isAppForeground = false
         isTurboMode = false
         
+        // Strict single-task relay: only hand off the currently active task to background session.
+        // Queued tasks remain in 'queued' status and will be started one-by-one upon completion callbacks.
         guard let activeRecord = records.first(where: { ["downloading", "scheduled"].contains($0.status) }),
               let task = tasks[activeRecord.id] else {
-            submitBackgroundBatch()
+            startNextIfPossible()
             return
         }
         
@@ -130,8 +132,8 @@ final class DownloadEngine: NSObject, ObservableObject, URLSessionDownloadDelega
                     try? resumeData.write(to: self.resumeURL(activeRecord.id), options: .atomic)
                 }
                 self.tasks.removeValue(forKey: activeRecord.id)
+                // Resume the single active task in backgroundSession
                 self.startTask(activeRecord, resume: resumeData != nil, inBackground: true)
-                self.submitBackgroundBatch()
                 
                 if bgTaskID != .invalid {
                     UIApplication.shared.endBackgroundTask(bgTaskID)
@@ -159,31 +161,12 @@ final class DownloadEngine: NSObject, ObservableObject, URLSessionDownloadDelega
                     try? resumeData.write(to: self.resumeURL(activeRecord.id), options: .atomic)
                 }
                 self.tasks.removeValue(forKey: activeRecord.id)
-                self.cancelUnstartedBackgroundTasks()
                 self.startTask(activeRecord, resume: resumeData != nil, inBackground: false)
             }
         })
     }
     
-    private func submitBackgroundBatch() {
-        let ids = SerialDownloadQueue.batchIDs(records: records, restoring: restoring, outstanding: !retiringTasks.isEmpty)
-        for id in ids {
-            guard let i = records.firstIndex(where: { $0.id == id }) else { continue }
-            if tasks[id] == nil {
-                startTask(records[i], resume: true, inBackground: true)
-            }
-        }
-    }
-    
-    private func cancelUnstartedBackgroundTasks() {
-        for (id, task) in tasks {
-            if let rec = records.first(where: { $0.id == id }), rec.status != "downloading" {
-                retiringTasks.insert(task.taskIdentifier)
-                task.cancel()
-                tasks.removeValue(forKey: id)
-            }
-        }
-    }
+
     
     func setBackgroundCompletion(_ handler: @escaping () -> Void) {
         DispatchQueue.main.async { self.backgroundCompletion = handler }
@@ -241,18 +224,16 @@ final class DownloadEngine: NSObject, ObservableObject, URLSessionDownloadDelega
     
     private func startNextIfPossible() {
         guard !restoring else { return }
-        if isAppForeground {
-            if records.contains(where: { ["downloading", "scheduled"].contains($0.status) }) {
-                return
-            }
-            guard let next = records.first(where: { $0.status == "queued" }) else {
-                updateSpeed(bytes: 0, forceReset: true)
-                return
-            }
-            startTask(next, resume: true, inBackground: false)
-        } else {
-            submitBackgroundBatch()
+        // Strict single-task relay: exactly 1 file actively downloading at any time across both foreground and background
+        if records.contains(where: { ["downloading", "scheduled"].contains($0.status) }) {
+            return
         }
+        guard let next = records.first(where: { $0.status == "queued" }) else {
+            updateSpeed(bytes: 0, forceReset: true)
+            return
+        }
+        // Start the single next file in foregroundSession if awake, or backgroundSession if asleep
+        startTask(next, resume: true, inBackground: !isAppForeground)
     }
     
     private func availableBytes() -> Int64? {
