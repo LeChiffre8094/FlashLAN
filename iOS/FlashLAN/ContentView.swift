@@ -56,6 +56,7 @@ struct ZenScreenView: View {
     @State private var offset: CGSize = .zero
     @State private var timer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
     @State private var timeString: String = ""
+    @State private var savedBrightness: CGFloat = 0.5
     
     private var activeRecord: DownloadRecord? {
         engine.records.first { ["downloading", "scheduled"].contains($0.status) }
@@ -148,6 +149,11 @@ struct ZenScreenView: View {
             }
             .onAppear {
                 updateTime()
+                savedBrightness = UIScreen.main.brightness
+                UIScreen.main.brightness = 0.0
+            }
+            .onDisappear {
+                UIScreen.main.brightness = savedBrightness
             }
         }
         .contentShape(Rectangle())

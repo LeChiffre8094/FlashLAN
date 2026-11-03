@@ -24,8 +24,8 @@ final class DownloadEngine: NSObject, ObservableObject, URLSessionDownloadDelega
     }
     
     private let fileQueue = DispatchQueue(label: "FlashLAN.fileOperations", qos: .userInitiated)
-    private var foregroundSession: URLSession!
-    private var backgroundSession: URLSession!
+    private var session: URLSession!
+    private let transferMonitor = TransferMonitor()
     private var backgroundCompletion: (() -> Void)?
     private let storeQueue = DispatchQueue(label: "FlashLAN.store")
     
@@ -64,26 +64,18 @@ final class DownloadEngine: NSObject, ObservableObject, URLSessionDownloadDelega
             }
         }
         
-        // 1. Foreground High-Speed Session (Turbo mode 55-60+ MB/s)
-        let fgConfig = URLSessionConfiguration.default
-        fgConfig.allowsCellularAccess = false
-        fgConfig.waitsForConnectivity = true
-        fgConfig.timeoutIntervalForRequest = 60
-        fgConfig.timeoutIntervalForResource = 7 * 24 * 60 * 60
-        fgConfig.httpMaximumConnectionsPerHost = 1
-        foregroundSession = URLSession(configuration: fgConfig, delegate: self, delegateQueue: .main)
+        transferMonitor.seed(records)
         
-        // 2. Background Keep-Alive Session
-        let bgConfig = URLSessionConfiguration.background(withIdentifier: "com.flashlan.downloader.background.v1")
-        bgConfig.sessionSendsLaunchEvents = true
-        bgConfig.isDiscretionary = false
-        bgConfig.allowsCellularAccess = false
-        bgConfig.waitsForConnectivity = true
-        bgConfig.httpMaximumConnectionsPerHost = 1
-        bgConfig.timeoutIntervalForRequest = 7 * 24 * 60 * 60
-        bgConfig.timeoutIntervalForResource = 7 * 24 * 60 * 60
-        bgConfig.httpShouldUsePipelining = false
-        backgroundSession = URLSession(configuration: bgConfig, delegate: self, delegateQueue: .main)
+        let config = URLSessionConfiguration.background(withIdentifier: "com.flashlan.downloader.background.v1")
+        config.sessionSendsLaunchEvents = true
+        config.isDiscretionary = false
+        config.allowsCellularAccess = false
+        config.waitsForConnectivity = true
+        config.httpMaximumConnectionsPerHost = 1
+        config.timeoutIntervalForRequest = 7 * 24 * 60 * 60
+        config.timeoutIntervalForResource = 7 * 24 * 60 * 60
+        config.httpShouldUsePipelining = false
+        session = URLSession(configuration: config, delegate: self, delegateQueue: .main)
         
         setupLifecycleObservers()
         restoreTasks()
@@ -94,6 +86,19 @@ final class DownloadEngine: NSObject, ObservableObject, URLSessionDownloadDelega
                                                name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground),
                                                name: UIApplication.willEnterForegroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshDesktopMonitor),
+                                               name: UIApplication.didBecomeActiveNotification, object: nil)
+    }
+    
+    @objc private func refreshDesktopMonitor() {
+        transferMonitor.update(records)
+        transferMonitor.resend()
+    }
+    
+    private func updateIdleTimer() {
+        let isDownloading = records.contains { $0.status == "downloading" }
+        // Keep screen awake automatically whenever downloading is in progress, or in Zen Mode
+        UIApplication.shared.isIdleTimerDisabled = isZenModeActive || isDownloading
     }
     
     deinit {
@@ -104,66 +109,15 @@ final class DownloadEngine: NSObject, ObservableObject, URLSessionDownloadDelega
     @objc private func appDidEnterBackground() {
         isAppForeground = false
         isTurboMode = false
-        
-        // Strict single-task relay: only hand off the currently active task to background session.
-        // Queued tasks remain in 'queued' status and will be started one-by-one upon completion callbacks.
-        guard let activeRecord = records.first(where: { ["downloading", "scheduled"].contains($0.status) }),
-              let task = tasks[activeRecord.id] else {
-            startNextIfPossible()
-            return
-        }
-        
-        var bgTaskID = UIBackgroundTaskIdentifier.invalid
-        bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "FlashLAN.handoff") {
-            if bgTaskID != .invalid {
-                UIApplication.shared.endBackgroundTask(bgTaskID)
-                bgTaskID = .invalid
-            }
-        }
-        
-        retiringTasks.insert(task.taskIdentifier)
-        task.cancel(byProducingResumeData: { [weak self] resumeData in
-            DispatchQueue.main.async {
-                guard let self = self else {
-                    if bgTaskID != .invalid { UIApplication.shared.endBackgroundTask(bgTaskID); bgTaskID = .invalid }
-                    return
-                }
-                if let resumeData {
-                    try? resumeData.write(to: self.resumeURL(activeRecord.id), options: .atomic)
-                }
-                self.tasks.removeValue(forKey: activeRecord.id)
-                // Resume the single active task in backgroundSession
-                self.startTask(activeRecord, resume: resumeData != nil, inBackground: true)
-                
-                if bgTaskID != .invalid {
-                    UIApplication.shared.endBackgroundTask(bgTaskID)
-                    bgTaskID = .invalid
-                }
-            }
-        })
+        // Background URLSession maintains TCP socket connection alive without disconnecting!
+        // No socket abort = No PC error = No premature jumping to next file.
     }
     
     @objc private func appWillEnterForeground() {
         isAppForeground = true
         isTurboMode = true
-        
-        guard let activeRecord = records.first(where: { ["downloading", "scheduled"].contains($0.status) }),
-              let task = tasks[activeRecord.id] else {
-            startNextIfPossible()
-            return
-        }
-        
-        retiringTasks.insert(task.taskIdentifier)
-        task.cancel(byProducingResumeData: { [weak self] resumeData in
-            DispatchQueue.main.async {
-                guard let self = self, self.isAppForeground else { return }
-                if let resumeData {
-                    try? resumeData.write(to: self.resumeURL(activeRecord.id), options: .atomic)
-                }
-                self.tasks.removeValue(forKey: activeRecord.id)
-                self.startTask(activeRecord, resume: resumeData != nil, inBackground: false)
-            }
-        })
+        updateIdleTimer()
+        startNextIfPossible()
     }
     
 
@@ -173,6 +127,8 @@ final class DownloadEngine: NSObject, ObservableObject, URLSessionDownloadDelega
     }
     
     private func persist() {
+        transferMonitor.update(records)
+        updateIdleTimer()
         let snapshot = records
         let url = stateURL
         storeQueue.async {
@@ -190,7 +146,7 @@ final class DownloadEngine: NSObject, ObservableObject, URLSessionDownloadDelega
     }
     
     private func restoreTasks() {
-        backgroundSession.getAllTasks { existing in
+        session.getAllTasks { existing in
             DispatchQueue.main.async {
                 for task in existing {
                     guard let download = task as? URLSessionDownloadTask, let id = task.taskDescription,
@@ -224,16 +180,17 @@ final class DownloadEngine: NSObject, ObservableObject, URLSessionDownloadDelega
     
     private func startNextIfPossible() {
         guard !restoring else { return }
-        // Strict single-task relay: exactly 1 file actively downloading at any time across both foreground and background
+        // Strict single-task relay: exactly 1 file actively downloading at any time
         if records.contains(where: { ["downloading", "scheduled"].contains($0.status) }) {
+            updateIdleTimer()
             return
         }
         guard let next = records.first(where: { $0.status == "queued" }) else {
             updateSpeed(bytes: 0, forceReset: true)
+            updateIdleTimer()
             return
         }
-        // Start the single next file in foregroundSession if awake, or backgroundSession if asleep
-        startTask(next, resume: true, inBackground: !isAppForeground)
+        startTask(next, resume: true)
     }
     
     private func availableBytes() -> Int64? {
@@ -285,18 +242,19 @@ final class DownloadEngine: NSObject, ObservableObject, URLSessionDownloadDelega
         return accepted.count
     }
     
-    private func startTask(_ record: DownloadRecord, resume: Bool, inBackground: Bool) {
+    private func startTask(_ record: DownloadRecord, resume: Bool) {
         guard let i = records.firstIndex(where: { $0.id == record.id }) else { return }
         guard let url = URL(string: record.url), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
             records[i].status = "failed"; records[i].error = "无效下载地址"; persist(); startNextIfPossible(); return
         }
         
-        let targetSession = inBackground ? backgroundSession! : foregroundSession!
         let task: URLSessionDownloadTask
         if resume, let data = try? Data(contentsOf: resumeURL(record.id)) {
-            task = targetSession.downloadTask(withResumeData: data)
+            task = session.downloadTask(withResumeData: data)
         } else {
-            task = targetSession.downloadTask(with: url)
+            var request = URLRequest(url: url)
+            request.setValue(record.id, forHTTPHeaderField: "X-LAN-Task-ID")
+            task = session.downloadTask(with: request)
             records[i].bytes = 0
         }
         records[i].status = "scheduled"
@@ -757,5 +715,114 @@ enum SerialDownloadQueue {
         let first = active ?? records.first { $0.status == "queued" }
         guard let first, let selected = origin(first.url) else { return [] }
         return records.filter { $0.status == "queued" && origin($0.url) == selected }.map { $0.id }
+    }
+}
+
+
+// Optional desktop display metadata. This session never drives or gates downloads.
+// Failure/unsupported Caddy endpoint is ignored; background transfer remains independent.
+private final class TransferMonitor: NSObject, URLSessionTaskDelegate {
+    private struct Item: Encodable, Equatable {
+        let id: String
+        let path: String
+        let size: Int64
+        var status: String
+        let savedName: String?
+    }
+    private struct Target: Equatable {
+        let endpoint: URL
+        var item: Item
+    }
+    private var tracked = Set<String>()
+    private var latest: [String: Target] = [:]
+    private var acknowledged: [String: Target] = [:]
+    private var attempts: [String: Int] = [:]
+    private var pending: DispatchWorkItem?
+    private var inFlight = false
+    private lazy var session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 5
+        config.timeoutIntervalForResource = 8
+        config.allowsCellularAccess = false
+        config.httpMaximumConnectionsPerHost = 2
+        return URLSession(configuration: config, delegate: self, delegateQueue: .main)
+    }()
+    func seed(_ records: [DownloadRecord]) {
+        tracked = Set(records.filter { ["queued", "scheduled", "downloading", "paused", "pausing"].contains($0.status) }.map(\.id))
+    }
+    func resend() {
+        acknowledged.removeAll(); attempts.removeAll()
+        schedule(after: 0.25)
+    }
+    func update(_ records: [DownloadRecord]) {
+        var present = Set<String>()
+        var changed = false
+        for record in records {
+            present.insert(record.id)
+            if ["queued", "scheduled", "downloading"].contains(record.status) { tracked.insert(record.id) }
+            guard tracked.contains(record.id), UUID(uuidString: record.id) != nil,
+                  let address = DesktopMonitorAddress.resolve(record.url) else { continue }
+            let path = address.path
+            let endpoint = address.endpoint
+            let state: String
+            switch record.status {
+            case "completed": state = "completed"
+            case "paused", "pausing": state = "paused"
+            case "cancelled", "cancelling": state = "cancelled"
+            case "failed", "interrupted": state = "failed"
+            default: state = "queued"
+            }
+            let target = Target(endpoint: endpoint, item: Item(id: record.id, path: path,
+                size: max(0, record.size), status: state, savedName: state == "completed" ? record.localName : nil))
+            if latest[record.id] != target { latest[record.id] = target; attempts[record.id] = 0; changed = true }
+        }
+        for id in Array(latest.keys) where !present.contains(id) && latest[id]?.item.status == "queued" {
+            latest[id]?.item.status = "cancelled"; attempts[id] = 0; changed = true
+        }
+        if changed { schedule(after: 0.25) }
+    }
+    private func schedule(after delay: Double) {
+        pending?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.flush() }
+        pending = work; DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+    private func flush() {
+        guard !inFlight else { return }
+        let unsent = latest.filter { acknowledged[$0.key] != $0.value && (attempts[$0.key] ?? 0) < 3 }
+        guard let endpoint = unsent.values.first?.endpoint else { return }
+        let batch = Array(unsent.filter { $0.value.endpoint == endpoint }.prefix(128))
+        guard let data = try? JSONEncoder().encode(batch.map { $0.value.item }) else { return }
+        for (id, _) in batch { attempts[id, default: 0] += 1 }
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"; request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        inFlight = true
+        session.dataTask(with: request) { [weak self] _, response, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.inFlight = false
+                if (response as? HTTPURLResponse)?.statusCode == 204 {
+                    for (id, target) in batch { self.acknowledged[id] = target }
+                }
+                self.schedule(after: 1)
+            }
+        }.resume()
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
+enum DesktopMonitorAddress {
+    static func resolve(_ raw: String) -> (endpoint: URL, path: String)? {
+        guard var components = URLComponents(string: raw), components.host != nil,
+              components.user == nil, components.password == nil,
+              ["http", "https"].contains(components.scheme?.lowercased() ?? "") else { return nil }
+        let path = components.percentEncodedPath
+        components.path = "/.lan-transfer/v1/tasks"
+        components.query = nil; components.fragment = nil
+        guard let endpoint = components.url else { return nil }
+        return (endpoint, path)
     }
 }
