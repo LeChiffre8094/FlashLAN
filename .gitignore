@@ -1,0 +1,8 @@
+.DS_Store
+DerivedData/
+build/
+build-tests/
+TestResults.xcresult
+*.ipa
+Payload/
+*.port
