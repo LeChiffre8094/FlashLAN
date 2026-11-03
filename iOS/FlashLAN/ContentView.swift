@@ -358,6 +358,12 @@ struct DownloadsView: View {
             } message: {
                 Text(deletion?.action == .deleteFile ? "将从设备删除文件及下载记录。" : "仅从列表移除此条记录，原文件保留。")
             }
+            .overlay(alignment: .top) {
+                if let video {
+                    FloatingVideoPlayer(session: video) { self.video = nil }
+                }
+            }
+            .onDisappear { video?.close(); video = nil }
         }
     }
     

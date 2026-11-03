@@ -177,7 +177,7 @@ final class DownloadEngine: NSObject, ObservableObject, URLSessionDownloadDelega
     
     private func cancelUnstartedBackgroundTasks() {
         for (id, task) in tasks {
-            if let rec = records.first(where: { $0.id == id }), rec.status == "queued" {
+            if let rec = records.first(where: { $0.id == id }), rec.status != "downloading" {
                 retiringTasks.insert(task.taskIdentifier)
                 task.cancel()
                 tasks.removeValue(forKey: id)
