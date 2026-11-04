@@ -41,6 +41,7 @@ struct ContentView: View {
                 .zIndex(999)
             }
         }
+        .statusBarHidden(engine.isZenModeActive)
         .alert("提示", isPresented: Binding(get: { engine.notice != nil }, set: { if !$0 { engine.notice = nil } })) {
             Button("好") { engine.notice = nil }
         } message: { Text(engine.notice ?? "") }
@@ -156,6 +157,7 @@ struct ZenScreenView: View {
                 UIScreen.main.brightness = savedBrightness
             }
         }
+        .statusBarHidden(true)
         .contentShape(Rectangle())
         .onTapGesture {
             onDismiss()
